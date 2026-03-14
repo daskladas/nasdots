@@ -1,8 +1,21 @@
 # NixOS NAS on a Ugreen DXP4800 Plus
 
+![NixOS](https://img.shields.io/badge/NixOS-25.11-5277C3?logo=nixos&logoColor=white)
+![RAID](https://img.shields.io/badge/RAID5-3×8TB_IronWolf-4CAF50)
+![btrfs](https://img.shields.io/badge/btrfs-zstd:1-orange)
+![NFS](https://img.shields.io/badge/NFS-2_exports-blue)
+![Fail2Ban](https://img.shields.io/badge/Fail2Ban-active-critical)
+![License](https://img.shields.io/badge/License-MIT-yellow)
+
 I wanted a NAS that I actually understand. No proprietary OS, no clicking through web UIs, no mystery services running in the background. Just a plain NixOS system where every single thing is declared in config files I can read, version, and rebuild from scratch in minutes.
 
 This repo contains the complete NixOS configuration for my home NAS — a Ugreen DXP4800 Plus running three 8TB drives in RAID5 for storage and two 128GB NVMe drives in RAID1 for the OS.
+
+<p align="center">
+  <img src="screenshots/dashboard.png" alt="nixnas-status dashboard" width="750">
+  <br>
+  <em>sudo nixnas-status — live system dashboard over SSH</em>
+</p>
 
 ## Hardware
 
@@ -31,7 +44,13 @@ The entire system is ~8 files. Here's what they set up:
 
 **UGOS Protection** — The DXP4800 Plus ships with Ugreen's proprietary OS on an internal NVMe SSD. I keep it intact for warranty. Four independent layers make sure it's never written to: excluded from disko, udev sets it read-only by serial, a systemd service re-applies on boot, and there are no mount entries. Restoring UGOS is just a BIOS boot order change.
 
-**Monitoring** — A custom bash dashboard (`sudo nixnas-status`) shows RAID status, drive health, temperatures, NFS share status, and active services over SSH.
+## Dashboard
+
+Building a full web interface for a NAS felt like overkill — and kind of against the whole point of running a minimal NixOS system. Instead there's `nixnas-status`, a ~350 line bash script that gives you a live overview of everything that matters, right in your terminal over SSH.
+
+It shows system stats, network, storage with usage bars, RAID health, all drives with SMART status and temperatures, NFS share status, and all services at a glance. Updates every 5 seconds without flickering (cursor repositioning instead of clear). Runs as `sudo nixnas-status`.
+
+The script is bundled into the NixOS config via `writeShellScriptBin` — no extra installation, it's just there after a rebuild.
 
 ## Files
 
@@ -65,12 +84,6 @@ UGOS SSD ─ /dev/nvme2n1  (READ-ONLY)
 → Shared ESP hosts NixOS + UGOS bootloaders
 ```
 
-## Boot Workaround
-
-The DXP4800 Plus BIOS only lists its internal NVMe slot as bootable. The Patriot P300 M.2 drives are invisible to the boot menu.
-
-**Solution:** NixOS systemd-boot is installed on the UGOS SSD's ESP partition (alongside the original "debian" bootloader). NixOS itself lives on the Patriot P300 RAID1. On every `nixos-rebuild`, the ESP is automatically synced to both the backup NVMe and the UGOS SSD, so every generation is always bootable.
-
 ## Reproducing This
 
 You'll need a Ugreen DXP4800 Plus (or similar x86 NAS) with NVMe + HDD drives. The DXP4800 Plus has a quirk: it only boots from its internal NVMe slot. So the NixOS bootloader lives on the UGOS SSD's ESP partition alongside the vendor bootloader, while NixOS itself runs from the Patriot P300 RAID1.
@@ -95,9 +108,8 @@ nix --experimental-features "nix-command flakes" build \
 nixos-install --root /mnt --system ./result --no-root-passwd
 
 # 6. Copy NixOS bootloader to the UGOS SSD ESP and create EFI entry
-#    (the internal NVMe is the only slot the BIOS can boot from)
 mount /dev/nvme2n1p1 /mnt/ugos-esp
-cp -r /mnt/boot/EFI/* /mnt/ugos-esp/EFI/
+rsync -a --exclude='EFI/debian' /mnt/boot/ /mnt/ugos-esp/
 efibootmgr -c -d /dev/nvme2n1 -p 1 -L "NixOS" -l '\EFI\systemd\systemd-bootx64.efi'
 
 # 7. Reboot, remove USB, NixOS should boot
@@ -108,19 +120,6 @@ After first boot, any future changes are just:
 
 ```bash
 cd /etc/nixos && sudo nixos-rebuild switch --flake .#nixnas
-```
-
-## Expanding Storage (4th HDD)
-
-Bay 4 is empty and ready for a 4th drive:
-
-```bash
-sudo sgdisk -Z /dev/sdX
-sudo sgdisk -n 1:0:0 -t 1:fd00 /dev/sdX
-sudo mdadm --add /dev/md126 /dev/sdX1
-sudo mdadm --grow /dev/md126 --raid-devices=4
-sudo btrfs filesystem resize max /data
-# Update disko-config.nix with the new device
 ```
 
 ## Known Quirks
