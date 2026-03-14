@@ -156,6 +156,7 @@
     pciutils       # lspci
     usbutils       # lsusb
     dmidecode      # hardware info
+    lm_sensors
 
     # Disk & RAID tools
     smartmontools  # smartctl
