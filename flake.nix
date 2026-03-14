@@ -19,6 +19,7 @@
         ./hardware-configuration.nix
         ./modules/nfs.nix
         ./modules/ugos-protection.nix
+        ./modules/fan-control.nix
       ];
     };
   };
