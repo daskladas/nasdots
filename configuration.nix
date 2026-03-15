@@ -191,7 +191,7 @@
     notifications.mail.enable = false;
     # Short self-test daily 04:00, long self-test Sunday 02:00
     # Temperature warning at 45°C, critical at 55°C
-    defaults.monitored = "-a -o on -S on -s (S/../.././04|L/../../7/02) -W 4,45,55";
+    defaults.monitored = "-a -o on -S on -n standby,q -s (S/../.././04|L/../../7/02) -W 4,45,55";
   };
 
   # ============================================================

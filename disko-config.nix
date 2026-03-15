@@ -141,7 +141,7 @@
           type = "filesystem";
           format = "btrfs";
           mountpoint = "/data";
-          mountOptions = [ "defaults" "noatime" "compress=zstd:1" ];
+          mountOptions = [ "defaults" "noatime" "compress=zstd:1" "commit=3600" ];
         };
       };
     };
