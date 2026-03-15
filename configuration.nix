@@ -66,18 +66,10 @@
       enable = true;
       allowedTCPPorts = [
         22    # SSH
-        111   # rpcbind (NFS)
         2049  # NFS
-        4000  # statd (NFS)
-        4001  # lockd (NFS)
-        4002  # mountd (NFS)
       ];
       allowedUDPPorts = [
-        111   # rpcbind (NFS)
         2049  # NFS
-        4000  # statd (NFS)
-        4001  # lockd (NFS)
-        4002  # mountd (NFS)
       ];
     };
   };
@@ -117,7 +109,7 @@
     # Acoustic Management: 128 = quiet mode (range 128-254, lower = quieter)
     ${pkgs.hdparm}/bin/hdparm -M 128 /dev/sda /dev/sdb /dev/sdc 2>/dev/null || true
   '';
- 
+
   # ============================================================
   # Fail2Ban – SSH brute-force protection
   # ============================================================
@@ -183,9 +175,9 @@
     file
     unzip
     jq
-    bc  
+    bc
     efibootmgr
-  
+
     # Dashboard tool
     (writeShellScriptBin "nixnas-status" (builtins.readFile ./scripts/nixnas-status))
   ];

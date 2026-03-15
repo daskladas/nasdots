@@ -13,8 +13,10 @@
   #   2. force_id=0x8613             → chip not in mainline ID table
   #   3. ignore_resource_conflict=1  → driver-level ACPI override
   #
-  # The out-of-tree module installs to extra/ which depmod
-  # prioritises over the in-tree version in kernel/drivers/hwmon/.
+  # Channel mapping (DXP4800 Plus):
+  #   pwm2 → fan2  (HDD cage / front fans)
+  #   pwm3 → fan3  (system / rear fan)
+  #   pwm4, pwm5   (no readable fan sensor, likely auxiliary)
   # ============================================================
 
   # Kernel parameter: allow hwmon drivers to access ACPI-reserved I/O ports
@@ -52,7 +54,7 @@
 
   boot.kernelModules = [ "it87" ];
 
-  # Set pwm4/pwm5 to auto mode after module loads
+  # Set all fan channels to automatic mode after module loads
   systemd.services.fan-control = {
     description = "Set NAS fans to automatic mode";
     wantedBy = [ "multi-user.target" ];
@@ -62,13 +64,14 @@
       RemainAfterExit = true;
     };
     script = ''
-      # Wait for hwmon devices to settle, retry up to 10 seconds
       for attempt in $(seq 1 10); do
         for hwmon in /sys/class/hwmon/hwmon*; do
           if [ "$(cat $hwmon/name 2>/dev/null)" = "it8613" ]; then
+            echo 2 > $hwmon/pwm2_enable 2>/dev/null || true
+            echo 2 > $hwmon/pwm3_enable 2>/dev/null || true
             echo 2 > $hwmon/pwm4_enable 2>/dev/null || true
             echo 2 > $hwmon/pwm5_enable 2>/dev/null || true
-            echo "Fan control: pwm4/pwm5 set to auto on $hwmon (attempt $attempt)"
+            echo "Fan control: all channels set to auto on $hwmon (attempt $attempt)"
             exit 0
           fi
         done
