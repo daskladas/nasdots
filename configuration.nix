@@ -214,6 +214,12 @@
     "d /data/media/Anime 0755 admin users -"
     "d /data/media/Filme 0755 admin users -"
     "d /data/media/Serien 0755 admin users -"
+    "d /data/media/Musik 0755 admin users -"
+    "d /data/incoming 0755 admin users -"
+    "d /data/incoming/Anime 0755 admin users -"
+    "d /data/incoming/Filme 0755 admin users -"
+    "d /data/incoming/Serien 0755 admin users -"
+    "d /data/incoming/Musik 0755 admin users -"
   ];
 
   # ============================================================
