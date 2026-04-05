@@ -20,6 +20,7 @@
         ./modules/nfs.nix
         ./modules/ugos-protection.nix
         ./modules/fan-control.nix
+        ./modules/hdd-fan-control.nix
       ];
     };
   };
