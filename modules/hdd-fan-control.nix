@@ -29,8 +29,8 @@ let
   hwmonName = "it8613";
   pwmChannel = "pwm2";
   disks = [ "/dev/sda" "/dev/sdb" "/dev/sdc" ];
-  intervalSec = 60;
-  failsafePwm = 200;
+  intervalSec = 20;
+  failsafePwm = 220;
 
   hddFanControl = pkgs.writeShellApplication {
     name = "hdd-fan-control";
@@ -140,10 +140,10 @@ let
         NEW_LEVEL=0
       else
         # Roh-Level aus max_temp
-        if   [ "$MAX_TEMP" -ge 55 ]; then RAW=5
-        elif [ "$MAX_TEMP" -ge 50 ]; then RAW=4
-        elif [ "$MAX_TEMP" -ge 45 ]; then RAW=3
-        elif [ "$MAX_TEMP" -ge 40 ]; then RAW=2
+        if   [ "$MAX_TEMP" -ge 53 ]; then RAW=5
+        elif [ "$MAX_TEMP" -ge 48 ]; then RAW=4
+        elif [ "$MAX_TEMP" -ge 43 ]; then RAW=3
+        elif [ "$MAX_TEMP" -ge 38 ]; then RAW=2
         else                              RAW=1
         fi
 
@@ -153,10 +153,10 @@ let
         else
           # Runterregeln nur wenn 3 °C unter der unteren Grenze des aktuellen Levels
           case "$LAST_LEVEL" in
-            5) DOWN=52 ;;   # 55 - 3
-            4) DOWN=47 ;;   # 50 - 3
-            3) DOWN=42 ;;   # 45 - 3
-            2) DOWN=37 ;;   # 40 - 3
+            5) DOWN=50 ;;   # 55 - 3
+            4) DOWN=45 ;;   # 50 - 3
+            3) DOWN=40 ;;   # 45 - 3
+            2) DOWN=35 ;;   # 40 - 3
             *) DOWN=0 ;;
           esac
           if [ "$MAX_TEMP" -lt "$DOWN" ]; then
@@ -168,11 +168,11 @@ let
       fi
 
       case "$NEW_LEVEL" in
-        0) PWM=60  ;;
-        1) PWM=80  ;;
+        0) PWM=25  ;;
+        1) PWM=60  ;;
         2) PWM=120 ;;
-        3) PWM=160 ;;
-        4) PWM=200 ;;
+        3) PWM=170 ;;
+        4) PWM=220 ;;
         5) PWM=255 ;;
       esac
 
