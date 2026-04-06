@@ -92,6 +92,22 @@ let
       # Haupt-Schleife
       # ============================================================
       while true; do
+        # Enable-Mode bei jedem Durchlauf neu durchsetzen. Schützt
+        # gegen fan-control.service-Restarts (die pwm2_enable=2
+        # setzen würden), manuelle Eingriffe, oder sonstige Reset-
+        # Ereignisse. Ohne diesen Check würden PWM-Writes mit
+        # "Device or resource busy" fehlschlagen und der Daemon
+        # würde stillschweigend in einem Retry-Loop hängen.
+        CUR_ENABLE="$(cat "$ENABLE_FILE" 2>/dev/null || echo 0)"
+        if [ "$CUR_ENABLE" != "1" ]; then
+          echo "hdd-fan-control: pwm2_enable=$CUR_ENABLE -> setze auf 1 (Manual)"
+          if ! echo 1 > "$ENABLE_FILE" 2>/dev/null; then
+            echo "ERROR: konnte ''${PWM_CH}_enable nicht auf 1 setzen" >&2
+            sleep 30
+            continue
+          fi
+        fi
+
         MAX_TEMP=0
         ACTIVE_COUNT=0
         STANDBY_COUNT=0
