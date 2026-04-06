@@ -2,42 +2,43 @@
 
 let
   # ============================================================
-  # HDD-Temperatur-basierte Lüftersteuerung
+  # HDD-Temperatur-basierte Lüftersteuerung (adaptive daemon)
   #
-  # Der IT8613E Auto-Mode (pwm_enable=2) regelt nur nach CPU-/
-  # Mainboard-Temperaturen. Bei Schreiblast auf die HDDs bleiben
-  # die Fans leise während die Platten kochen. Dieses Modul liest
-  # die HDD-Temps alle 60 s via smartctl und setzt pwm2 (HDD-Cage
-  # / Front-Fans) manuell anhand einer Kurve mit Hysterese.
+  # Läuft als long-running systemd-Service (Type=simple) mit
+  # interner Sleep-Schleife. Liest HDD-Temps via smartctl und
+  # regelt pwm2 (HDD-Cage / Front-Fans) am IT8613E.
   #
-  # pwm3/pwm4/pwm5 bleiben im Auto-Mode (CPU/Mainboard) — siehe
-  # fan-control.nix. Saubere Trennung: dieses Modul kümmert sich
-  # ausschließlich um pwm2.
+  # Design-Ziele:
+  #   - Im Idle quasi lautlos (Platten Standby → pwm=25)
+  #   - Adaptive Poll-Frequenz: kalt = selten, heiß = oft
+  #   - Breite Dead-Zones → keine Fan-Oszillation
+  #   - Zuverlässige schnelle Reaktion unter Last
   #
-  # Kurve (max. HDD-Temp → pwm2):
-  #   alle Disks in Standby → 60   (nur Mainboard-Kühlung)
-  #   < 40 °C               → 80
-  #   40–44 °C              → 120
-  #   45–49 °C              → 160
-  #   50–54 °C              → 200
-  #   ≥ 55 °C               → 255  (max, Brüll-Modus)
+  # Level / PWM / Sleep:
+  #   0  all standby        pwm=25   sleep=600s  (free polling)
+  #   1  active <38°C       pwm=50   sleep=600s  (minimize pokes)
+  #   2  38-44°C            pwm=130  sleep=120s
+  #   3  45-52°C            pwm=200  sleep=30s
+  #   4  >=53°C             pwm=255  sleep=15s   (critical)
   #
-  # Hysterese: 3 °C beim Runterregeln (Pumpen vermeiden).
-  # Failsafe: bei smartctl-Fehler oder hwmon-Problem → pwm=200.
+  # Hysterese: 4°C beim Runterregeln
+  #   Level 4 -> 3 erst wenn <49°C
+  #   Level 3 -> 2 erst wenn <41°C
+  #   Level 2 -> 1 erst wenn <34°C
+  #
+  # Failsafe: smartctl-Fehler auf allen Platten -> pwm=220
+  # Cleanup:  bei SIGTERM/SIGINT -> pwm2_enable=2 (Auto zurück)
   # ============================================================
 
   hwmonName = "it8613";
   pwmChannel = "pwm2";
   disks = [ "/dev/sda" "/dev/sdb" "/dev/sdc" ];
-  intervalSec = 20;
   failsafePwm = 220;
 
   hddFanControl = pkgs.writeShellApplication {
     name = "hdd-fan-control";
     runtimeInputs = with pkgs; [ smartmontools jq coreutils ];
-    # shellcheck is happy because writeShellApplication runs it
     text = ''
-      # writeShellApplication setzt bereits: set -euo pipefail
       HWMON_NAME="${hwmonName}"
       PWM_CH="${pwmChannel}"
       DISKS=( ${lib.concatStringsSep " " disks} )
@@ -47,9 +48,9 @@ let
 
       mkdir -p "$STATE_DIR"
 
-      # ---------- hwmon suchen (Retry für Boot-Race) ----------
+      # ---------- hwmon suchen (Boot-Race Toleranz) ----------
       HWMON=""
-      for _ in 1 2 3 4 5; do
+      for _ in 1 2 3 4 5 6 7 8 9 10; do
         for h in /sys/class/hwmon/hwmon*; do
           if [ -r "$h/name" ] && [ "$(cat "$h/name" 2>/dev/null)" = "$HWMON_NAME" ]; then
             HWMON="$h"
@@ -60,7 +61,7 @@ let
       done
 
       if [ -z "$HWMON" ]; then
-        echo "ERROR: hwmon '$HWMON_NAME' nicht gefunden — it87-Modul geladen?" >&2
+        echo "FATAL: hwmon '$HWMON_NAME' nicht gefunden — it87-Modul geladen?" >&2
         exit 1
       fi
 
@@ -68,156 +69,143 @@ let
       ENABLE_FILE="''${PWM_FILE}_enable"
 
       if [ ! -w "$PWM_FILE" ] || [ ! -w "$ENABLE_FILE" ]; then
-        echo "ERROR: $PWM_FILE oder $ENABLE_FILE nicht beschreibbar" >&2
+        echo "FATAL: $PWM_FILE nicht beschreibbar" >&2
         exit 1
       fi
 
-      # ---------- Manual-Mode aktivieren (nur wenn nötig) ----------
-      CUR_ENABLE="$(cat "$ENABLE_FILE" 2>/dev/null || echo 0)"
-      if [ "$CUR_ENABLE" != "1" ]; then
-        if ! echo 1 > "$ENABLE_FILE" 2>/dev/null; then
-          echo "ERROR: kann ''${PWM_CH}_enable=1 nicht setzen" >&2
-          exit 1
-        fi
+      # ---------- Einmalig: Manual-Mode übernehmen ----------
+      if ! echo 1 > "$ENABLE_FILE"; then
+        echo "FATAL: kann ''${PWM_CH}_enable=1 nicht setzen" >&2
+        exit 1
       fi
+      echo "hdd-fan-control: gestartet auf $HWMON, pwm2 in Manual-Mode"
 
-      # ---------- HDD-Temps lesen ----------
-      MAX_TEMP=0
-      ACTIVE_COUNT=0
-      STANDBY_COUNT=0
-      ERROR_COUNT=0
-      TEMPS_LOG=""
+      # ---------- Cleanup bei Stop/Restart ----------
+      cleanup() {
+        echo "hdd-fan-control: Shutdown — stelle Auto-Mode wieder her"
+        echo 2 > "$ENABLE_FILE" 2>/dev/null || true
+        exit 0
+      }
+      trap cleanup TERM INT
 
-      for disk in "''${DISKS[@]}"; do
-        name="$(basename "$disk")"
-        # -n standby: nicht aufwecken, exit 2 = device in low-power state
-        # -j: JSON-Output für sauberes Parsen
-        # Idiom für RC-Capture unter `set -e`: cmd || RC=$?
-        RC=0
-        OUT="$(smartctl -n standby -A -j "$disk" 2>/dev/null)" || RC=$?
+      # ============================================================
+      # Haupt-Schleife
+      # ============================================================
+      while true; do
+        MAX_TEMP=0
+        ACTIVE_COUNT=0
+        STANDBY_COUNT=0
+        ERROR_COUNT=0
+        TEMPS_LOG=""
 
-        if [ "$RC" -eq 0 ]; then
-          TEMP="$(printf '%s' "$OUT" | jq -r '.temperature.current // empty' 2>/dev/null || true)"
-          if [[ "$TEMP" =~ ^[0-9]+$ ]] && [ "$TEMP" -gt 0 ]; then
-            TEMPS_LOG="$TEMPS_LOG $name=''${TEMP}C"
-            ACTIVE_COUNT=$((ACTIVE_COUNT + 1))
-            if [ "$TEMP" -gt "$MAX_TEMP" ]; then
-              MAX_TEMP=$TEMP
+        for disk in "''${DISKS[@]}"; do
+          name="$(basename "$disk")"
+          # -n standby: wenn Platte schläft, rc=2 ohne Disk-Zugriff (kostenlos)
+          RC=0
+          OUT="$(smartctl -n standby -A -j "$disk" 2>/dev/null)" || RC=$?
+
+          if [ "$RC" -eq 0 ]; then
+            TEMP="$(printf '%s' "$OUT" | jq -r '.temperature.current // empty' 2>/dev/null || true)"
+            if [[ "$TEMP" =~ ^[0-9]+$ ]] && [ "$TEMP" -gt 0 ]; then
+              TEMPS_LOG="$TEMPS_LOG $name=''${TEMP}C"
+              ACTIVE_COUNT=$((ACTIVE_COUNT + 1))
+              [ "$TEMP" -gt "$MAX_TEMP" ] && MAX_TEMP=$TEMP
+            else
+              TEMPS_LOG="$TEMPS_LOG $name=?"
+              ERROR_COUNT=$((ERROR_COUNT + 1))
             fi
+          elif [ "$RC" -eq 2 ]; then
+            # Platte im Standby — nicht geweckt, nicht in max_temp eingerechnet
+            TEMPS_LOG="$TEMPS_LOG $name=STANDBY"
+            STANDBY_COUNT=$((STANDBY_COUNT + 1))
           else
-            TEMPS_LOG="$TEMPS_LOG $name=?"
+            TEMPS_LOG="$TEMPS_LOG $name=ERR(rc=$RC)"
             ERROR_COUNT=$((ERROR_COUNT + 1))
           fi
-        elif [ "$RC" -eq 2 ]; then
-          # Disk im Standby — nicht aufwecken, nicht in max_temp einrechnen
-          TEMPS_LOG="$TEMPS_LOG $name=STANDBY"
-          STANDBY_COUNT=$((STANDBY_COUNT + 1))
-        else
-          TEMPS_LOG="$TEMPS_LOG $name=ERR(rc=$RC)"
-          ERROR_COUNT=$((ERROR_COUNT + 1))
-        fi
-      done
+        done
 
-      # ---------- Level berechnen ----------
-      # Levels:  0=all standby  1=<40  2=40-44  3=45-49  4=50-54  5=>=55
-      # PWMs:      60             80     120      160      200      255
-      LAST_LEVEL="$(cat "$STATE_FILE" 2>/dev/null || echo 1)"
-      case "$LAST_LEVEL" in
-        0|1|2|3|4|5) ;;
-        *) LAST_LEVEL=1 ;;
-      esac
+        LAST_LEVEL="$(cat "$STATE_FILE" 2>/dev/null || echo 1)"
+        case "$LAST_LEVEL" in 0|1|2|3|4) ;; *) LAST_LEVEL=1 ;; esac
 
-      # Kein einziger aktiver Messwert + mind. ein Fehler → Failsafe
-      if [ "$ACTIVE_COUNT" -eq 0 ] && [ "$ERROR_COUNT" -gt 0 ]; then
-        echo "ERROR: keine HDD-Temps lesbar (errors=$ERROR_COUNT standby=$STANDBY_COUNT) — Failsafe pwm=$FAILSAFE_PWM" >&2
-        echo "$FAILSAFE_PWM" > "$PWM_FILE"
-        # Level nicht persistieren, damit nächster Durchlauf frisch startet
-        exit 1
-      fi
-
-      if [ "$ACTIVE_COUNT" -eq 0 ]; then
-        # Alle Disks im Standby → minimaler Lüfter
-        NEW_LEVEL=0
-      else
-        # Roh-Level aus max_temp
-        if   [ "$MAX_TEMP" -ge 53 ]; then RAW=5
-        elif [ "$MAX_TEMP" -ge 48 ]; then RAW=4
-        elif [ "$MAX_TEMP" -ge 43 ]; then RAW=3
-        elif [ "$MAX_TEMP" -ge 38 ]; then RAW=2
-        else                              RAW=1
+        # ---------- Failsafe: alle Platten unlesbar ----------
+        if [ "$ACTIVE_COUNT" -eq 0 ] && [ "$STANDBY_COUNT" -eq 0 ] && [ "$ERROR_COUNT" -gt 0 ]; then
+          echo "ERROR: keine HDD lesbar (err=$ERROR_COUNT) — Failsafe pwm=$FAILSAFE_PWM" >&2
+          echo "$FAILSAFE_PWM" > "$PWM_FILE"
+          sleep 30
+          continue
         fi
 
-        if [ "$RAW" -ge "$LAST_LEVEL" ]; then
-          # Hochregeln: sofort, keine Hysterese
-          NEW_LEVEL=$RAW
+        # ---------- Level berechnen ----------
+        if [ "$ACTIVE_COUNT" -eq 0 ]; then
+          NEW_LEVEL=0
         else
-          # Runterregeln nur wenn 3 °C unter der unteren Grenze des aktuellen Levels
-          case "$LAST_LEVEL" in
-            5) DOWN=50 ;;   # 55 - 3
-            4) DOWN=45 ;;   # 50 - 3
-            3) DOWN=40 ;;   # 45 - 3
-            2) DOWN=35 ;;   # 40 - 3
-            *) DOWN=0 ;;
-          esac
-          if [ "$MAX_TEMP" -lt "$DOWN" ]; then
-            NEW_LEVEL=$((LAST_LEVEL - 1))
+          if   [ "$MAX_TEMP" -ge 53 ]; then RAW=4
+          elif [ "$MAX_TEMP" -ge 45 ]; then RAW=3
+          elif [ "$MAX_TEMP" -ge 38 ]; then RAW=2
+          else                              RAW=1
+          fi
+
+          if [ "$RAW" -ge "$LAST_LEVEL" ]; then
+            # Hochregeln: sofort
+            NEW_LEVEL=$RAW
           else
-            NEW_LEVEL=$LAST_LEVEL
+            # Runterregeln nur bei 4°C unter der unteren Level-Grenze
+            case "$LAST_LEVEL" in
+              4) DOWN=49 ;;   # 53 - 4
+              3) DOWN=41 ;;   # 45 - 4
+              2) DOWN=34 ;;   # 38 - 4
+              *) DOWN=0  ;;
+            esac
+            if [ "$MAX_TEMP" -lt "$DOWN" ]; then
+              NEW_LEVEL=$((LAST_LEVEL - 1))
+            else
+              NEW_LEVEL=$LAST_LEVEL
+            fi
           fi
         fi
-      fi
 
-      case "$NEW_LEVEL" in
-        0) PWM=25  ;;
-        1) PWM=60  ;;
-        2) PWM=120 ;;
-        3) PWM=170 ;;
-        4) PWM=220 ;;
-        5) PWM=255 ;;
-      esac
+        # ---------- PWM + Sleep zum Level ----------
+        case "$NEW_LEVEL" in
+          0) PWM=25;  SLEEP=600 ;;
+          1) PWM=50;  SLEEP=600 ;;
+          2) PWM=130; SLEEP=120 ;;
+          3) PWM=200; SLEEP=30  ;;
+          4) PWM=255; SLEEP=15  ;;
+        esac
 
-      if ! echo "$PWM" > "$PWM_FILE"; then
-        echo "ERROR: konnte pwm=$PWM nicht nach $PWM_FILE schreiben" >&2
-        exit 1
-      fi
-      echo "$NEW_LEVEL" > "$STATE_FILE"
+        if ! echo "$PWM" > "$PWM_FILE"; then
+          echo "ERROR: konnte pwm=$PWM nicht schreiben" >&2
+          sleep 30
+          continue
+        fi
+        echo "$NEW_LEVEL" > "$STATE_FILE"
 
-      echo "hdd-fan-control: max=''${MAX_TEMP}C active=$ACTIVE_COUNT standby=$STANDBY_COUNT err=$ERROR_COUNT level=$NEW_LEVEL pwm=$PWM temps:$TEMPS_LOG"
+        echo "hdd-fan-control: max=''${MAX_TEMP}C active=$ACTIVE_COUNT standby=$STANDBY_COUNT err=$ERROR_COUNT level=$NEW_LEVEL pwm=$PWM next=''${SLEEP}s temps:$TEMPS_LOG"
+
+        sleep "$SLEEP"
+      done
     '';
   };
 in
 {
-  # Script systemweit verfügbar machen (Debug / manuelles Ausführen)
   environment.systemPackages = [ hddFanControl ];
 
   # ------------------------------------------------------------
-  # Service: ein Lauf der HDD-Fan-Kurve
+  # Long-running Daemon (kein Timer mehr!)
   # ------------------------------------------------------------
   systemd.services.hdd-fan-control = {
-    description = "HDD-temperature-based fan control (pwm2)";
-    # Läuft NACH dem bestehenden fan-control.service, der pwmN_enable=2
-    # setzt. Wir übernehmen dann pwm2 in Manual-Mode (=1).
+    description = "HDD-temperature-based fan control daemon (adaptive)";
+    wantedBy = [ "multi-user.target" ];
     after = [ "fan-control.service" "systemd-modules-load.service" ];
     wants = [ "fan-control.service" ];
     serviceConfig = {
-      Type = "oneshot";
+      Type = "simple";
       ExecStart = "${hddFanControl}/bin/hdd-fan-control";
-      # Kein Restart on failure — der Timer triggert eh alle 60 s neu.
-      # StandardOutput landet automatisch im journal.
-    };
-  };
-
-  # ------------------------------------------------------------
-  # Timer: alle 60 s
-  # ------------------------------------------------------------
-  systemd.timers.hdd-fan-control = {
-    description = "Run HDD fan control every ${toString intervalSec}s";
-    wantedBy = [ "timers.target" ];
-    timerConfig = {
-      OnBootSec = "30s";
-      OnUnitActiveSec = "${toString intervalSec}s";
-      AccuracySec = "5s";
-      Unit = "hdd-fan-control.service";
+      Restart = "on-failure";
+      RestartSec = "30s";
+      # SIGTERM an das Script -> cleanup trap -> Auto-Mode restore
+      KillSignal = "SIGTERM";
+      TimeoutStopSec = "10s";
     };
   };
 }
