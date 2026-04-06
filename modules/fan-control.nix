@@ -14,8 +14,8 @@
   #   3. ignore_resource_conflict=1  → driver-level ACPI override
   #
   # Channel mapping (DXP4800 Plus):
-  #   pwm2 → fan2  (HDD cage / front fans)
-  #   pwm3 → fan3  (system / rear fan)
+  #   pwm2 → fan2  (HDD cage / front fans)  – managed by hdd-fan-control daemon
+  #   pwm3 → fan3  (system / rear fan)      – constant manual value (see below)
   #   pwm4, pwm5   (no readable fan sensor, likely auxiliary)
   # ============================================================
 
@@ -54,9 +54,15 @@
 
   boot.kernelModules = [ "it87" ];
 
-  # Set all fan channels to automatic mode after module loads
+  # Initialise fan channels after module loads.
+  #   pwm2 → auto (will be overridden to manual by hdd-fan-control.service)
+  #   pwm3 → manual constant (prevents IT8613 auto-mode fan cycling at idle:
+  #          the chip stops the fan below a CPU temp threshold, CPU warms
+  #          1-2°C without airflow, chip restarts fan → audible ~10s cycling.
+  #          CPU is low-TDP, constant pwm=80 is plenty thermally.)
+  #   pwm4/pwm5 → auto (no fans connected)
   systemd.services.fan-control = {
-    description = "Set NAS fans to automatic mode";
+    description = "Initialise NAS fan channels";
     wantedBy = [ "multi-user.target" ];
     after = [ "systemd-modules-load.service" ];
     serviceConfig = {
@@ -68,10 +74,11 @@
         for hwmon in /sys/class/hwmon/hwmon*; do
           if [ "$(cat $hwmon/name 2>/dev/null)" = "it8613" ]; then
             echo 2 > $hwmon/pwm2_enable 2>/dev/null || true
-            echo 2 > $hwmon/pwm3_enable 2>/dev/null || true
+            echo 1 > $hwmon/pwm3_enable 2>/dev/null || true
+            echo 80 > $hwmon/pwm3 2>/dev/null || true
             echo 2 > $hwmon/pwm4_enable 2>/dev/null || true
             echo 2 > $hwmon/pwm5_enable 2>/dev/null || true
-            echo "Fan control: all channels set to auto on $hwmon (attempt $attempt)"
+            echo "Fan control: initialised channels on $hwmon (attempt $attempt)"
             exit 0
           fi
         done
