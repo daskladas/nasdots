@@ -103,12 +103,24 @@
   # ============================================================
   # HDD Spindown & Acoustic Management
   # ============================================================
-  powerManagement.powerUpCommands = ''
-    # Spindown after 20 minutes idle (value 240 = 20min)
-    ${pkgs.hdparm}/bin/hdparm -S 240 /dev/sda /dev/sdb /dev/sdc 2>/dev/null || true
-    # Acoustic Management: 128 = quiet mode (range 128-254, lower = quieter)
-    ${pkgs.hdparm}/bin/hdparm -M 128 /dev/sda /dev/sdb /dev/sdc 2>/dev/null || true
-  '';
+  # Wird als systemd-Service statt powerUpCommands gesetzt, weil
+  # powerUpCommands nur nach Resume-from-Suspend läuft, nicht bei
+  # normalem Boot. Folge: hdparm-Settings waren bisher nie aktiv.
+  systemd.services.hdd-power-management = {
+    description = "Set HDD spindown timer and acoustic management";
+    wantedBy = [ "multi-user.target" ];
+    after = [ "systemd-udev-settle.service" ];
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+    };
+    script = ''
+      # Spindown after 20 minutes idle (value 240 = 20min * 5s units)
+      ${pkgs.hdparm}/bin/hdparm -S 240 /dev/sda /dev/sdb /dev/sdc || true
+      # Acoustic Management: 128 = quiet mode (range 128-254, lower = quieter)
+      ${pkgs.hdparm}/bin/hdparm -M 128 /dev/sda /dev/sdb /dev/sdc || true
+    '';
+  };
 
   # ============================================================
   # Fail2Ban – SSH brute-force protection
