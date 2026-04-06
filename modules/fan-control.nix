@@ -74,7 +74,8 @@
         for hwmon in /sys/class/hwmon/hwmon*; do
           if [ "$(cat $hwmon/name 2>/dev/null)" = "it8613" ]; then
             echo 2 > $hwmon/pwm2_enable 2>/dev/null || true
-            echo 2 > $hwmon/pwm3_enable 2>/dev/null || true
+            echo 1 > $hwmon/pwm3_enable 2>/dev/null || true
+            echo 50 > $hwmon/pwm3 2>/dev/null || true
             echo 2 > $hwmon/pwm4_enable 2>/dev/null || true
             echo 2 > $hwmon/pwm5_enable 2>/dev/null || true
             echo "Fan control: initialised channels on $hwmon (attempt $attempt)"
